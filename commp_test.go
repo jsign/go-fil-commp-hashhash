@@ -113,7 +113,7 @@ func TestZero(t *testing.T) {
 	for _, test := range tests {
 		test := test
 		t.Run(fmt.Sprintf("%d", test.PayloadSize), func(t *testing.T) {
-			//t.Parallel()
+			t.Parallel()
 			r := io.LimitReader(&repeatedReader{b: 0x00}, test.PayloadSize)
 			if err := verifyReaderSizeAndCommP(t, r, test); err != nil {
 				t.Fatal(err)
