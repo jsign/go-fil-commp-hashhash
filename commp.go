@@ -27,7 +27,7 @@ type Calc struct {
 }
 type state struct {
 	bytesConsumed uint64
-	layerQueues   [MaxLayers + 2]chan []byte // one extra layer for the initial leaves, one more for the dummy never-to-use channel
+	layerQueues   [MaxLayers + 2]chan [][]byte // one extra layer for the initial leaves, one more for the dummy never-to-use channel
 	resultCommP   chan []byte
 	carry         []byte
 }
@@ -177,7 +177,7 @@ func (cp *Calc) Write(input []byte) (int, error) {
 	if cp.bytesConsumed == 0 {
 		cp.carry = make([]byte, 0, 127)
 		cp.resultCommP = make(chan []byte, 1)
-		cp.layerQueues[0] = make(chan []byte, layerQueueDepth)
+		cp.layerQueues[0] = make(chan [][]byte, layerQueueDepth)
 		cp.addLayer(0)
 	}
 
@@ -217,6 +217,7 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	// Holds this round's shifts of the original 127 bytes plus the 6 bit overflow
 	// at the end of the expansion cycle. We *do not* reuse this array: it is
 	// being fed piece-wise to hash254Into which in turn reuses it for the result
+	//expander := expanderPool.Get().([]byte)
 	var expander [128]byte
 
 	// Cycle over four(4) 31-byte groups, leaving 1 byte in between:
@@ -244,8 +245,8 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	expander[63] &= 0x3F
 
 	// ready to dispatch first half
-	cp.layerQueues[0] <- expander[0:32]
-	cp.layerQueues[0] <- expander[32:64]
+	//cp.layerQueues[0] <- expander[0:32]
+	//cp.layerQueues[0] <- expander[32:64]
 
 	//  In: {{ C[7] C[6] C[5] C[4] }} X[7] X[6] X[5] X[4] X[3] X[2] X[1] X[0] Y[7] Y[6] Y[5] Y[4] Y[3] Y[2] Y[1] Y[0] Z[7] Z[6] Z[5]...
 	// Out:                           X[3] X[2] X[1] X[0] C[7] C[6] C[5] C[4] Y[3] Y[2] Y[1] Y[0] X[7] X[6] X[5] X[4] Z[3] Z[2] Z[1]...
@@ -265,8 +266,9 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	expander[127] = input[126] >> 2
 
 	// and dispatch remainder
-	cp.layerQueues[0] <- expander[64:96]
-	cp.layerQueues[0] <- expander[96:128]
+	//cp.layerQueues[0] <- expander[64:96]
+	//cp.layerQueues[0] <- expander[96:128]
+	cp.layerQueues[0] <- [][]byte{expander[0:32], expander[32:64], expander[64:96], expander[96:128]}
 }
 
 func (cp *Calc) addLayer(myIdx uint) {
@@ -274,7 +276,7 @@ func (cp *Calc) addLayer(myIdx uint) {
 	if cp.layerQueues[myIdx+1] != nil {
 		panic("addLayer called more than once with identical idx argument")
 	}
-	cp.layerQueues[myIdx+1] = make(chan []byte, layerQueueDepth)
+	cp.layerQueues[myIdx+1] = make(chan [][]byte, layerQueueDepth)
 
 	go func() {
 		var chunkHold []byte
@@ -305,32 +307,42 @@ func (cp *Calc) addLayer(myIdx uint) {
 				return
 			}
 
-			if chunkHold == nil {
-				chunkHold = chunk
-			} else {
+			if len(chunk) == 1 {
+				if chunkHold == nil {
+					chunkHold = chunk[0]
+				} else {
 
-				// We are last right now
-				// n.b. we will not blow out of the preallocated layerQueues array,
-				// as we disallow Write()s above a certain threshold
+					// We are last right now
+					// n.b. we will not blow out of the preallocated layerQueues array,
+					// as we disallow Write()s above a certain threshold
+					if cp.layerQueues[myIdx+2] == nil {
+						cp.addLayer(myIdx + 1)
+					}
+
+					cp.hash254Into(cp.layerQueues[myIdx+1], chunkHold, chunk[0])
+					chunkHold = nil
+				}
+
+			} else {
 				if cp.layerQueues[myIdx+2] == nil {
 					cp.addLayer(myIdx + 1)
 				}
 
-				cp.hash254Into(cp.layerQueues[myIdx+1], chunkHold, chunk)
-				chunkHold = nil
+				cp.hash254Into(cp.layerQueues[myIdx+1], chunk[0], chunk[1])
+				cp.hash254Into(cp.layerQueues[myIdx+1], chunk[2], chunk[3])
 			}
 		}
 	}()
 }
 
-func (cp *Calc) hash254Into(out chan<- []byte, half1ToOverwrite, half2 []byte) {
+func (cp *Calc) hash254Into(out chan<- [][]byte, half1ToOverwrite, half2 []byte) {
 	h := shaPool.Get().(hash.Hash)
 	h.Reset()
 	h.Write(half1ToOverwrite)
 	h.Write(half2)
 	d := h.Sum(half1ToOverwrite[:0]) // callers expect we will reuse-reduce-recycle
 	d[31] &= 0x3F
-	out <- d
+	out <- [][]byte{d}
 	shaPool.Put(h)
 }
 

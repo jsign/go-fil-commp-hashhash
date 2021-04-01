@@ -201,3 +201,22 @@ func getTestCases(path string) ([]testCase, error) {
 
 	return ret, nil
 }
+
+func BenchmarkCommP(b *testing.B) {
+	size := int64(1 << 22)
+	data := make([]byte, size)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.SetBytes(size)
+	for i := 0; i < b.N; i++ {
+		cp := &Calc{}
+		if _, err := io.Copy(cp, bytes.NewReader(data)); err != nil {
+			b.Fatal(err)
+		}
+		_, _, err := cp.Digest()
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
