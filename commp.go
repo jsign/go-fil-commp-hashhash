@@ -217,7 +217,6 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	// Holds this round's shifts of the original 127 bytes plus the 6 bit overflow
 	// at the end of the expansion cycle. We *do not* reuse this array: it is
 	// being fed piece-wise to hash254Into which in turn reuses it for the result
-	//expander := expanderPool.Get().([]byte)
 	var expander [128]byte
 
 	// Cycle over four(4) 31-byte groups, leaving 1 byte in between:
@@ -297,8 +296,7 @@ func (cp *Calc) addLayer(myIdx uint) {
 				if chunkHold != nil {
 					cp.hash254Into(
 						cp.layerQueues[myIdx+1],
-						chunkHold,
-						stackedNulPadding[myIdx],
+						[][]byte{chunkHold, stackedNulPadding[myIdx]},
 					)
 				}
 
@@ -319,30 +317,39 @@ func (cp *Calc) addLayer(myIdx uint) {
 						cp.addLayer(myIdx + 1)
 					}
 
-					cp.hash254Into(cp.layerQueues[myIdx+1], chunkHold, chunk[0])
+					cp.hash254Into(cp.layerQueues[myIdx+1], [][]byte{chunkHold, chunk[0]})
 					chunkHold = nil
 				}
 
 			} else {
+				if chunkHold != nil {
+					panic("OOPS")
+				}
 				if cp.layerQueues[myIdx+2] == nil {
 					cp.addLayer(myIdx + 1)
 				}
 
-				cp.hash254Into(cp.layerQueues[myIdx+1], chunk[0], chunk[1])
-				cp.hash254Into(cp.layerQueues[myIdx+1], chunk[2], chunk[3])
+				//cp.hash254Into(cp.layerQueues[myIdx+1], chunk[0], chunk[1])
+				//cp.hash254Into(cp.layerQueues[myIdx+1], chunk[2], chunk[3])
+				cp.hash254Into(cp.layerQueues[myIdx+1], chunk)
 			}
 		}
 	}()
 }
 
-func (cp *Calc) hash254Into(out chan<- [][]byte, half1ToOverwrite, half2 []byte) {
+func (cp *Calc) hash254Into(out chan<- [][]byte, halves [][]byte) {
 	h := shaPool.Get().(hash.Hash)
-	h.Reset()
-	h.Write(half1ToOverwrite)
-	h.Write(half2)
-	d := h.Sum(half1ToOverwrite[:0]) // callers expect we will reuse-reduce-recycle
-	d[31] &= 0x3F
-	out <- [][]byte{d}
+
+	res := make([][]byte, len(halves)/2)
+	for i := 0; i < len(halves); i += 2 {
+		h.Reset()
+		h.Write(halves[i])
+		h.Write(halves[i+1])
+		d := h.Sum(halves[i][:0]) // callers expect we will reuse-reduce-recycle
+		d[31] &= 0x3F
+		res[i/2] = d
+	}
+	out <- res[:]
 	shaPool.Put(h)
 }
 
