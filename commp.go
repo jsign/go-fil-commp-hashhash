@@ -48,7 +48,7 @@ const MaxPiecePayload = uint64(127 * (1 << (5 + MaxLayers - 7)))
 const MinPiecePayload = uint64(65)
 
 var (
-	layerQueueDepth   = 256 // SANCHECK: too much? too little? can't think this through right now...
+	layerQueueDepth   = 2048 // SANCHECK: too much? too little? can't think this through right now...
 	shaPool           = sync.Pool{New: func() interface{} { return sha256simd.New() }}
 	stackedNulPadding [MaxLayers][]byte
 )
@@ -309,7 +309,6 @@ func (cp *Calc) addLayer(myIdx uint) {
 				if chunkHold == nil {
 					chunkHold = chunk[0]
 				} else {
-
 					// We are last right now
 					// n.b. we will not blow out of the preallocated layerQueues array,
 					// as we disallow Write()s above a certain threshold
@@ -322,15 +321,10 @@ func (cp *Calc) addLayer(myIdx uint) {
 				}
 
 			} else {
-				if chunkHold != nil {
-					panic("OOPS")
-				}
 				if cp.layerQueues[myIdx+2] == nil {
 					cp.addLayer(myIdx + 1)
 				}
 
-				//cp.hash254Into(cp.layerQueues[myIdx+1], chunk[0], chunk[1])
-				//cp.hash254Into(cp.layerQueues[myIdx+1], chunk[2], chunk[3])
 				cp.hash254Into(cp.layerQueues[myIdx+1], chunk)
 			}
 		}
