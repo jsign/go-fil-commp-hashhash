@@ -31,6 +31,10 @@ func TestCommP(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if testing.Short() {
+		tests = tests[:90]
+	}
+
 	for _, test := range tests {
 		test := test
 		t.Run(fmt.Sprintf("%d", test.PayloadSize), func(t *testing.T) {
