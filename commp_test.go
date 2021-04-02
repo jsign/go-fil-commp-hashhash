@@ -32,7 +32,7 @@ func TestCommP(t *testing.T) {
 	}
 
 	if testing.Short() {
-		tests = tests[:90]
+		tests = tests[:95]
 	}
 
 	for _, test := range tests {
@@ -203,7 +203,7 @@ func getTestCases(path string) ([]testCase, error) {
 }
 
 func BenchmarkCommP(b *testing.B) {
-	size := int64(1 << 27)
+	size := int64(1 << 20)
 	data := make([]byte, size)
 
 	b.ReportAllocs()

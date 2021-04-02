@@ -280,56 +280,52 @@ func (cp *Calc) addLayer(myIdx uint) {
 	go func() {
 		var chunkHold []byte
 
-		tempHold := make([][]byte, 0, 1024)
+		flushed := false
+		size := 128
+		tempHold := make([][]byte, 0, size)
 		for chunks := range cp.layerQueues[myIdx] {
-			if chunkHold == nil && len(tempHold) > 512 {
+			if len(tempHold) > size-4 {
+				flushed = true
 				cp.layerQueues[myIdx+1] <- tempHold
-				tempHold = tempHold[:0]
+				tempHold = make([][]byte, 0, size)
 			}
 
-			if len(chunks) == 0 {
-				panic("chunks can't have zero length")
+			if myIdx < MaxLayers && cp.layerQueues[myIdx+2] == nil {
+				cp.addLayer(myIdx + 1)
 			}
 
-			for len(chunks) > 1 || (len(chunks) == 1 && chunkHold != nil) {
-				if cp.layerQueues[myIdx+2] == nil {
-					cp.addLayer(myIdx + 1)
-				}
-
+			for len(chunks) > 0 {
 				if chunkHold != nil {
 					tempHold = append(tempHold, cp.hash254Into(chunkHold, chunks[0]))
 					chunks = chunks[1:]
 					chunkHold = nil
 					continue
 				}
+
+				if len(chunks) == 1 {
+					chunkHold = chunks[0]
+					break
+				}
 				tempHold = append(tempHold, cp.hash254Into(chunks[0], chunks[1]))
 				chunks = chunks[2:]
-
-			}
-			if len(chunks) == 1 {
-				chunkHold = chunks[0]
 			}
 		}
 
-		// the dream is collapsing
-		if len(tempHold) > 0 {
-			cp.layerQueues[myIdx+1] <- tempHold
-			tempHold = tempHold[:0]
-		}
-
-		// I am last
-		if myIdx == MaxLayers || cp.layerQueues[myIdx+2] == nil {
+		if len(tempHold) == 0 && !flushed {
 			cp.resultCommP <- chunkHold
 			return
 		}
 
+		// the dream is collapsing
 		if chunkHold != nil {
-			cp.layerQueues[myIdx+1] <- [][]byte{cp.hash254Into(chunkHold, stackedNulPadding[myIdx])}
+			tempHold = append(tempHold, cp.hash254Into(chunkHold, stackedNulPadding[myIdx]))
+		}
+		if len(tempHold) > 0 {
+			cp.layerQueues[myIdx+1] <- tempHold
 		}
 
 		// signal the next in line that they are done too
 		close(cp.layerQueues[myIdx+1])
-
 	}()
 }
 
