@@ -203,7 +203,7 @@ func getTestCases(path string) ([]testCase, error) {
 }
 
 func BenchmarkCommP(b *testing.B) {
-	size := int64(1 << 22)
+	size := int64(1 << 27)
 	data := make([]byte, size)
 
 	b.ReportAllocs()

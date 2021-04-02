@@ -48,7 +48,7 @@ const MaxPiecePayload = uint64(127 * (1 << (5 + MaxLayers - 7)))
 const MinPiecePayload = uint64(65)
 
 var (
-	layerQueueDepth   = 2048 // SANCHECK: too much? too little? can't think this through right now...
+	layerQueueDepth   = 512 // SANCHECK: too much? too little? can't think this through right now...
 	shaPool           = sync.Pool{New: func() interface{} { return sha256simd.New() }}
 	stackedNulPadding [MaxLayers][]byte
 )
@@ -280,71 +280,70 @@ func (cp *Calc) addLayer(myIdx uint) {
 	go func() {
 		var chunkHold []byte
 
-		for {
-
-			chunk, queueIsOpen := <-cp.layerQueues[myIdx]
-
-			// the dream is collapsing
-			if !queueIsOpen {
-
-				// I am last
-				if myIdx == MaxLayers || cp.layerQueues[myIdx+2] == nil {
-					cp.resultCommP <- chunkHold
-					return
-				}
-
-				if chunkHold != nil {
-					cp.hash254Into(
-						cp.layerQueues[myIdx+1],
-						[][]byte{chunkHold, stackedNulPadding[myIdx]},
-					)
-				}
-
-				// signal the next in line that they are done too
-				close(cp.layerQueues[myIdx+1])
-				return
+		tempHold := make([][]byte, 0, 1024)
+		for chunks := range cp.layerQueues[myIdx] {
+			if chunkHold == nil && len(tempHold) > 512 {
+				cp.layerQueues[myIdx+1] <- tempHold
+				tempHold = tempHold[:0]
 			}
 
-			if len(chunk) == 1 {
-				if chunkHold == nil {
-					chunkHold = chunk[0]
-				} else {
-					// We are last right now
-					// n.b. we will not blow out of the preallocated layerQueues array,
-					// as we disallow Write()s above a certain threshold
-					if cp.layerQueues[myIdx+2] == nil {
-						cp.addLayer(myIdx + 1)
-					}
+			if len(chunks) == 0 {
+				panic("chunks can't have zero length")
+			}
 
-					cp.hash254Into(cp.layerQueues[myIdx+1], [][]byte{chunkHold, chunk[0]})
-					chunkHold = nil
-				}
-
-			} else {
+			for len(chunks) > 1 || (len(chunks) == 1 && chunkHold != nil) {
 				if cp.layerQueues[myIdx+2] == nil {
 					cp.addLayer(myIdx + 1)
 				}
 
-				cp.hash254Into(cp.layerQueues[myIdx+1], chunk)
+				if chunkHold != nil {
+					tempHold = append(tempHold, cp.hash254Into(chunkHold, chunks[0]))
+					chunks = chunks[1:]
+					chunkHold = nil
+					continue
+				}
+				tempHold = append(tempHold, cp.hash254Into(chunks[0], chunks[1]))
+				chunks = chunks[2:]
+
+			}
+			if len(chunks) == 1 {
+				chunkHold = chunks[0]
 			}
 		}
+
+		// the dream is collapsing
+		if len(tempHold) > 0 {
+			cp.layerQueues[myIdx+1] <- tempHold
+			tempHold = tempHold[:0]
+		}
+
+		// I am last
+		if myIdx == MaxLayers || cp.layerQueues[myIdx+2] == nil {
+			cp.resultCommP <- chunkHold
+			return
+		}
+
+		if chunkHold != nil {
+			cp.layerQueues[myIdx+1] <- [][]byte{cp.hash254Into(chunkHold, stackedNulPadding[myIdx])}
+		}
+
+		// signal the next in line that they are done too
+		close(cp.layerQueues[myIdx+1])
+
 	}()
 }
 
-func (cp *Calc) hash254Into(out chan<- [][]byte, halves [][]byte) {
+func (cp *Calc) hash254Into(h1, h2 []byte) []byte {
 	h := shaPool.Get().(hash.Hash)
+	h.Reset()
 
-	res := make([][]byte, len(halves)/2)
-	for i := 0; i < len(halves); i += 2 {
-		h.Reset()
-		h.Write(halves[i])
-		h.Write(halves[i+1])
-		d := h.Sum(halves[i][:0]) // callers expect we will reuse-reduce-recycle
-		d[31] &= 0x3F
-		res[i/2] = d
-	}
-	out <- res[:]
+	h.Write(h1)
+	h.Write(h2)
+	d := h.Sum(h1[:0]) // callers expect we will reuse-reduce-recycle
+	d[31] &= 0x3F
+
 	shaPool.Put(h)
+	return d
 }
 
 // PadCommP is experimental, do not use it.
