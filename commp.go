@@ -12,6 +12,8 @@ package commp
 import (
 	"hash"
 	"math/bits"
+	"os"
+	"strconv"
 	"sync"
 
 	sha256simd "github.com/minio/sha256-simd"
@@ -51,6 +53,7 @@ var (
 	layerQueueDepth   = 512 // SANCHECK: too much? too little? can't think this through right now...
 	shaPool           = sync.Pool{New: func() interface{} { return sha256simd.New() }}
 	stackedNulPadding [MaxLayers][]byte
+	size              = 128
 )
 
 // initialize the nul padding stack (cheap to do upfront, just MaxLayers loops)
@@ -65,6 +68,15 @@ func init() {
 		h.Write(stackedNulPadding[i-1]) // do it twice
 		stackedNulPadding[i] = h.Sum(make([]byte, 0, 32))
 		stackedNulPadding[i][31] &= 0x3F
+	}
+
+	var err error
+	envSize := os.Getenv("COMMP_SIZE")
+	if envSize != "" {
+		size, err = strconv.Atoi(envSize)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -281,7 +293,6 @@ func (cp *Calc) addLayer(myIdx uint) {
 		var chunkHold []byte
 
 		flushed := false
-		size := 128
 		tempHold := make([][]byte, 0, size)
 		for chunks := range cp.layerQueues[myIdx] {
 			if len(tempHold) > size-4 {
