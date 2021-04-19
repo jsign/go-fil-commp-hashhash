@@ -12,6 +12,8 @@ package commp
 import (
 	"hash"
 	"math/bits"
+	"os"
+	"strconv"
 	"sync"
 
 	sha256simd "github.com/minio/sha256-simd"
@@ -27,7 +29,7 @@ type Calc struct {
 }
 type state struct {
 	bytesConsumed uint64
-	layerQueues   [MaxLayers + 2]chan []byte // one extra layer for the initial leaves, one more for the dummy never-to-use channel
+	layerQueues   [MaxLayers + 2]chan [][]byte // one extra layer for the initial leaves, one more for the dummy never-to-use channel
 	resultCommP   chan []byte
 	carry         []byte
 }
@@ -48,9 +50,10 @@ const MaxPiecePayload = uint64(127 * (1 << (5 + MaxLayers - 7)))
 const MinPiecePayload = uint64(65)
 
 var (
-	layerQueueDepth   = 256 // SANCHECK: too much? too little? can't think this through right now...
+	layerQueueDepth   = 512 // SANCHECK: too much? too little? can't think this through right now...
 	shaPool           = sync.Pool{New: func() interface{} { return sha256simd.New() }}
 	stackedNulPadding [MaxLayers][]byte
+	tempHoldSize      = 1024
 )
 
 // initialize the nul padding stack (cheap to do upfront, just MaxLayers loops)
@@ -65,6 +68,15 @@ func init() {
 		h.Write(stackedNulPadding[i-1]) // do it twice
 		stackedNulPadding[i] = h.Sum(make([]byte, 0, 32))
 		stackedNulPadding[i][31] &= 0x3F
+	}
+
+	var err error
+	envSize := os.Getenv("COMMP_SIZE")
+	if envSize != "" {
+		tempHoldSize, err = strconv.Atoi(envSize)
+		if err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -177,7 +189,7 @@ func (cp *Calc) Write(input []byte) (int, error) {
 	if cp.bytesConsumed == 0 {
 		cp.carry = make([]byte, 0, 127)
 		cp.resultCommP = make(chan []byte, 1)
-		cp.layerQueues[0] = make(chan []byte, layerQueueDepth)
+		cp.layerQueues[0] = make(chan [][]byte, layerQueueDepth)
 		cp.addLayer(0)
 	}
 
@@ -244,8 +256,6 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	expander[63] &= 0x3F
 
 	// ready to dispatch first half
-	cp.layerQueues[0] <- expander[0:32]
-	cp.layerQueues[0] <- expander[32:64]
 
 	//  In: {{ C[7] C[6] C[5] C[4] }} X[7] X[6] X[5] X[4] X[3] X[2] X[1] X[0] Y[7] Y[6] Y[5] Y[4] Y[3] Y[2] Y[1] Y[0] Z[7] Z[6] Z[5]...
 	// Out:                           X[3] X[2] X[1] X[0] C[7] C[6] C[5] C[4] Y[3] Y[2] Y[1] Y[0] X[7] X[6] X[5] X[4] Z[3] Z[2] Z[1]...
@@ -265,8 +275,7 @@ func (cp *Calc) digestLeading127Bytes(input []byte) {
 	expander[127] = input[126] >> 2
 
 	// and dispatch remainder
-	cp.layerQueues[0] <- expander[64:96]
-	cp.layerQueues[0] <- expander[96:128]
+	cp.layerQueues[0] <- [][]byte{expander[0:32], expander[32:64], expander[64:96], expander[96:128]}
 }
 
 func (cp *Calc) addLayer(myIdx uint) {
@@ -274,64 +283,70 @@ func (cp *Calc) addLayer(myIdx uint) {
 	if cp.layerQueues[myIdx+1] != nil {
 		panic("addLayer called more than once with identical idx argument")
 	}
-	cp.layerQueues[myIdx+1] = make(chan []byte, layerQueueDepth)
+	cp.layerQueues[myIdx+1] = make(chan [][]byte, layerQueueDepth)
 
 	go func() {
 		var chunkHold []byte
 
-		for {
-
-			chunk, queueIsOpen := <-cp.layerQueues[myIdx]
-
-			// the dream is collapsing
-			if !queueIsOpen {
-
-				// I am last
-				if myIdx == MaxLayers || cp.layerQueues[myIdx+2] == nil {
-					cp.resultCommP <- chunkHold
-					return
-				}
-
-				if chunkHold != nil {
-					cp.hash254Into(
-						cp.layerQueues[myIdx+1],
-						chunkHold,
-						stackedNulPadding[myIdx],
-					)
-				}
-
-				// signal the next in line that they are done too
-				close(cp.layerQueues[myIdx+1])
-				return
+		flushed := false
+		tempHold := make([][]byte, 0, tempHoldSize+8)
+		for chunks := range cp.layerQueues[myIdx] {
+			if len(tempHold) >= tempHoldSize-4 {
+				flushed = true
+				cp.layerQueues[myIdx+1] <- tempHold
+				tempHold = make([][]byte, 0, tempHoldSize)
 			}
 
-			if chunkHold == nil {
-				chunkHold = chunk
-			} else {
+			if myIdx < MaxLayers && cp.layerQueues[myIdx+2] == nil {
+				cp.addLayer(myIdx + 1)
+			}
 
-				// We are last right now
-				// n.b. we will not blow out of the preallocated layerQueues array,
-				// as we disallow Write()s above a certain threshold
-				if cp.layerQueues[myIdx+2] == nil {
-					cp.addLayer(myIdx + 1)
+			for len(chunks) > 0 {
+				if chunkHold != nil {
+					tempHold = append(tempHold, cp.hash254Into(chunkHold, chunks[0]))
+					chunks = chunks[1:]
+					chunkHold = nil
+					continue
 				}
 
-				cp.hash254Into(cp.layerQueues[myIdx+1], chunkHold, chunk)
-				chunkHold = nil
+				if len(chunks) == 1 {
+					chunkHold = chunks[0]
+					break
+				}
+				tempHold = append(tempHold, cp.hash254Into(chunks[0], chunks[1]))
+				chunks = chunks[2:]
 			}
 		}
+
+		if len(tempHold) == 0 && !flushed {
+			cp.resultCommP <- chunkHold
+			return
+		}
+
+		// the dream is collapsing
+		if chunkHold != nil {
+			tempHold = append(tempHold, cp.hash254Into(chunkHold, stackedNulPadding[myIdx]))
+		}
+		if len(tempHold) > 0 {
+			cp.layerQueues[myIdx+1] <- tempHold
+		}
+
+		// signal the next in line that they are done too
+		close(cp.layerQueues[myIdx+1])
 	}()
 }
 
-func (cp *Calc) hash254Into(out chan<- []byte, half1ToOverwrite, half2 []byte) {
+func (cp *Calc) hash254Into(h1, h2 []byte) []byte {
 	h := shaPool.Get().(hash.Hash)
 	h.Reset()
-	h.Write(half1ToOverwrite)
-	h.Write(half2)
-	d := h.Sum(half1ToOverwrite[:0]) // callers expect we will reuse-reduce-recycle
+
+	h.Write(h1)
+	h.Write(h2)
+	d := h.Sum(h1[:0]) // callers expect we will reuse-reduce-recycle
 	d[31] &= 0x3F
-	out <- d
+
 	shaPool.Put(h)
+	return d
 }
 
 // PadCommP is experimental, do not use it.

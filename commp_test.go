@@ -20,28 +20,36 @@ type testCase struct {
 	RawCommP    []byte
 }
 
-const benchSize = 4 << 20 // MiB
-
 func BenchmarkCommP(b *testing.B) {
-	// reuse both the calculator and reader in every loop
-	// the source is rewound explicitly
-	// the calc is reset implicitly on Digest()
-	src := bytes.NewReader(make([]byte, benchSize))
-	cp := &Calc{}
+	sizes := []int{
+		4 << 20,
+		512 << 20,
+	}
 
-	b.ReportAllocs()
-	b.ResetTimer()
-	b.SetBytes(benchSize)
-	for i := 0; i < b.N; i++ {
-		if _, err := src.Seek(0, 0); err != nil {
-			b.Fatal(err)
-		}
-		if _, err := io.Copy(cp, src); err != nil {
-			b.Fatal(err)
-		}
-		if _, _, err := cp.Digest(); err != nil {
-			b.Fatal(err)
-		}
+	for _, tc := range sizes {
+		b.Run(strconv.Itoa(tc), func(b *testing.B) {
+
+			// reuse both the calculator and reader in every loop
+			// the source is rewound explicitly
+			// the calc is reset implicitly on Digest()
+			src := bytes.NewReader(make([]byte, tc))
+			cp := &Calc{}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			b.SetBytes(int64(tc))
+			for i := 0; i < b.N; i++ {
+				if _, err := src.Seek(0, 0); err != nil {
+					b.Fatal(err)
+				}
+				if _, err := io.Copy(cp, src); err != nil {
+					b.Fatal(err)
+				}
+				if _, _, err := cp.Digest(); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
 	}
 }
 
